@@ -161,21 +161,42 @@ def unlorenzo2d(A):
     Nk = A.shape[0]
     Nj = A.shape[1]
     Ni = A.shape[2]
+
     for kk in range(Nk):
-        # Initialize first row of output
-        for ii in range(Ni):
-            out[kk,0,ii] = A[kk,0,ii]
-        # Cumulative sum along first axis
-        for ii in numba.prange(Ni):
-            for jj in range(1,Nj):
-                out[kk,jj,ii] = A[kk,jj,ii] + out[kk,jj-1,ii]
-    
-        # # Cumulative sum along second axis
-        for jj in numba.prange(A.shape[1]):
-            for ii in range(1,A.shape[2]):
-                out[kk,jj,ii] = out[kk,jj,ii] + out[kk,jj,ii-1]
+        # jj=0 case
+        out[kk,0,:] = np.cumsum(A[kk,0,:])
+        for jj in range(1,Nj):
+            csum = 0
+            for ii in range(Ni):
+                csum += A[kk,jj,ii]
+                out[kk,jj,ii] = out[kk,jj-1,ii] + csum
 
     return out
+
+@numba.jit([numba.float32[:,:,:](numba.types.Array(numba.types.float32,3,'C',aligned=True),
+                                 numba.types.Array(numba.types.int32,3,'C',readonly=True),
+                                 numba.types.Array(numba.types.float32,1,'C',readonly=True),
+                                 numba.types.Array(numba.types.float32,1,'C',readonly=True),
+                                 numba.int64,
+                                )],
+           nopython=True,nogil=True,fastmath=True)
+def rescale_output(outbuf,quantized_field,plane_delta,plane_min,nbits):
+    '''Rescale the quantized output back to float32 given the quantized field,
+    the per-plane minima and deltas, and the number of bytes in the quantization'''
+    MAX_LEVEL = 2**nbits - 1
+    NAN_SIGIL = MAX_LEVEL+1
+    inv_max = 1/MAX_LEVEL
+
+    for kk in range(outbuf.shape[0]):
+        for jj in range(outbuf.shape[1]):
+            for ii in range(outbuf.shape[2]):
+                q = quantized_field[kk,jj,ii]
+                if (q == NAN_SIGIL):
+                    outbuf[kk,jj,ii] = np.nan
+                else:
+                    outbuf[kk,jj,ii] = plane_min[kk] + inv_max * plane_delta[kk] * q
+    # # out[:,:,:] = plane_min[:,None,None] + numba.float32(inv_max * plane_delta[:,None,None] * quantized_field)
+    return outbuf
 
 
 class LayerQuantizer(numcodecs.abc.Codec):
@@ -335,16 +356,18 @@ class LayerQuantizer(numcodecs.abc.Codec):
         if (self.transform == 'Lorenzo'):
             int_field = unlorenzo2d(binanegary(int_field.view(np.uint32)))
 
-        # Maximum quantized level (0 -- MAX_LEVEL inclusive)
-        MAX_LEVEL = 2**self.nbits - 1
-        # Sigil value for NaNs
-        NAN_SIGIL = MAX_LEVEL+1
+        rescale_output(out,int_field,plane_delta,plane_min,self.nbits)
 
-        out[:] = plane_min[:,np.newaxis,np.newaxis] + np.float32(((1/MAX_LEVEL)*(plane_delta[:,np.newaxis,np.newaxis])*int_field))
-        # Re-assign any NANs
+        # # Maximum quantized level (0 -- MAX_LEVEL inclusive)
+        # MAX_LEVEL = 2**self.nbits - 1
+        # # Sigil value for NaNs
+        # NAN_SIGIL = MAX_LEVEL+1
 
-        NAN_SIGIL = 2**self.nbits + 1
-        out[int_field == NAN_SIGIL] = np.nan
+        # out[:] = plane_min[:,np.newaxis,np.newaxis] + np.float32(((1/MAX_LEVEL)*(plane_delta[:,np.newaxis,np.newaxis])*int_field))
+        # # Re-assign any NANs
+
+        # NAN_SIGIL = 2**self.nbits + 1
+        # out[int_field == NAN_SIGIL] = np.nan
         
         return out
     def get_config(self):

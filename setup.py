@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='layerquantizer',
-    version='0.3b',
+    version='0.3b.1',
     description='LayerQuantizer, a numcodec-compatible quantizer/compressor for multi-layer data',
     url='https://github.com/csubich/layerquantizer',
     author='Christopher Subich',

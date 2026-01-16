@@ -24,4 +24,9 @@ dev = [
     "mypy>=1.19.1",
     "pytest>=9.0.2",
     "ruff>=0.14.13",
+    "types-setuptools>=80.9.0.20251223",
 ]
+
+[tool.mypy]
+ignore_missing_imports = true
+

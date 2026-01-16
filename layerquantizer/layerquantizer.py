@@ -356,7 +356,7 @@ class LayerQuantizer(numcodecs.abc.Codec):
             # New range value, inclusive of minimum but exclusive of maximum.  The log2
             # would cause a problem if plane_delta were 0, but those cases have been
             # already corrected above
-            plane_delta = 2 ** (1 + np.floor(np.log2(plane_delta)))
+            plane_delta = 2 ** (1 + np.floor(np.log2(plane_delta * (2**self.nbits) / (2**self.nbits - 1))))
 
             # Use this range to adjust the plane maximum.  plane_max is still
             # notionally inclusive, so it must be adjusted by (2^N-1)/2^N to

@@ -10,7 +10,7 @@ dependencies = [
     "numpy",
     "numcodecs",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 [project.urls]
 Homepage = "https://github.com/csubich/layerquantizer"
@@ -26,7 +26,7 @@ dev = [
     "ruff>=0.14.13",
     "types-setuptools>=80.9.0.20251223",
     "xarray",
-    "zarr<3",
+    "zarr",
 ]
 
 [tool.mypy]

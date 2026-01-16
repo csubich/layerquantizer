@@ -1,6 +1,8 @@
+from __future__ import annotations
 import numcodecs
 import warnings
 import numpy as np
+from typing import Any
 
 # Define helper functions for quantization and dequantization
 try:
@@ -31,7 +33,7 @@ try:
         nopython=True,
         fastmath=True,
     )  # ,parallel=True)
-    def quantizer(buf, nbits, plane_min, plane_max):
+    def quantizer(buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray) -> np.ndarray:
         """Encode buffer through linear quantization, using per-layer minima
         and maxima; each 2D plane of the buffer is an independent stream.  Internal processing
         happens at float32 precision, so this encoder is only meaningful for nbits <= 23"""
@@ -76,7 +78,9 @@ try:
         nopython=True,
         fastmath=True,
     )  # ,parallel=True)
-    def dequantizer(buf, nbits, plane_min, plane_max):
+    def dequantizer(
+        buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray
+    ) -> np.ndarray:
         """Takes quantized integer values and re-scale them to their float32 equivalents"""
         Nplanes = buf.shape[0]
         Ni = buf.shape[1]
@@ -98,7 +102,7 @@ try:
         return buf_out
 except ImportError:
     # numba isn't available, so define vector functions as a fallback
-    def quantizer(buf, nbits, plane_min, plane_max):
+    def quantizer(buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray) -> np.ndarray:
         """Encode buffer through quantization and linear prediction, using per-layer minima
         and maxima; each 2D plane of the buffer is an independent stream.  Internal processing
         happens at float32 precision, so this encoder is only meaningful for nbits <= 23"""
@@ -119,12 +123,14 @@ except ImportError:
             plane_scale[:, None, None] * (buf - plane_min[:, None, None])
         )
         # # Mark any NANs by the sigil value
-        np.nan_to_num(quantized_f, copy=False, nan=NAN_SIGIL)
+        np.nan_to_num(quantized_f, copy=False, nan=float(NAN_SIGIL))
         quantized_int = quantized_f.astype(np.int32)
 
         return quantized_int
 
-    def dequantizer(buf, nbits, plane_min, plane_max):
+    def dequantizer(
+        buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray
+    ) -> np.ndarray:
         """Takes quantized integer values and re-scale them to their float32 equivalents"""
         MAX_LEVEL = np.int32(2**nbits - 1)
         NAN_SIGIL = np.int32(MAX_LEVEL + 1)
@@ -137,7 +143,7 @@ except ImportError:
 
 
 @numba.vectorize([numba.uint32(numba.int32)], nopython=True)
-def negabinary(binary):
+def negabinary(binary: Any) -> Any:
     """Encode a signed 32-bit value (or array thereof) into base negative two,
     following https://en.wikipedia.org/wiki/Negative_base#Shortcut_calculation"""
     Schroeppel2 = np.uint32(0xAAAAAAAA)
@@ -146,7 +152,7 @@ def negabinary(binary):
 
 
 @numba.vectorize([numba.int32(numba.uint32)], nopython=True)
-def binanegary(negabinary):
+def binanegary(negabinary: Any) -> Any:
     """Convert a 32-bit value from base negative two to two's complement (signed) form"""
     Schroeppel2 = np.uint32(0xAAAAAAAA)
     bu32 = negabinary
@@ -162,7 +168,7 @@ def binanegary(negabinary):
     nopython=True,
     nogil=True,
 )
-def lorenzo2d(A):
+def lorenzo2d(A: np.ndarray) -> np.ndarray:
     """Perform Loernzo encoding (lexical prediction based on S/W/SW values) on a 2D array"""
     out = np.zeros_like(A)
     for k in range(0, A.shape[0]):
@@ -179,7 +185,7 @@ def lorenzo2d(A):
 
 
 @numba.jit([numba.int32[:, :, :](numba.int32[:, :, :])], nopython=True, nogil=True)
-def unlorenzo2d(A):
+def unlorenzo2d(A: np.ndarray) -> np.ndarray:
     """Invert Lorenzo encoding on a 2D array"""
     out = np.zeros_like(A)
     Nk = A.shape[0]
@@ -212,7 +218,13 @@ def unlorenzo2d(A):
     nogil=True,
     fastmath=True,
 )
-def rescale_output(outbuf, quantized_field, plane_delta, plane_min, nbits):
+def rescale_output(
+    outbuf: np.ndarray,
+    quantized_field: np.ndarray,
+    plane_delta: np.ndarray,
+    plane_min: np.ndarray,
+    nbits: int,
+) -> np.ndarray:
     """Rescale the quantized output back to float32 given the quantized field,
     the per-plane minima and deltas, and the number of bytes in the quantization"""
     MAX_LEVEL = 2**nbits - 1
@@ -255,13 +267,13 @@ class LayerQuantizer(numcodecs.abc.Codec):
 
     def __init__(
         self,
-        nbits=16,
-        transform="Lorenzo",
-        blosc_cname="zstd",
-        blosc_clevel=5,
-        in_id=codec_id,
-        pow2_range=False,
-    ):
+        nbits: int = 16,
+        transform: str = "Lorenzo",
+        blosc_cname: str = "zstd",
+        blosc_clevel: int = 5,
+        in_id: str = codec_id,
+        pow2_range: bool = False,
+    ) -> None:
         super().__init__()
         assert in_id == self.codec_id
         self.nbits = nbits
@@ -273,7 +285,7 @@ class LayerQuantizer(numcodecs.abc.Codec):
         self.pow2_range = pow2_range
         self.transform = transform
 
-    def encode(self, ibuf):
+    def encode(self, ibuf: np.ndarray) -> bytes | Any:
         """Encode buffer through layer quantization; each 2D plane of the buffer is quantized
         independently.  This encoder is only valid for float32, so nbits is only meaningful
         for nbits <= 24; any larger value will result in no quantization"""
@@ -378,7 +390,7 @@ class LayerQuantizer(numcodecs.abc.Codec):
 
         # return outbuf
 
-    def decode(self, buf, out=None):
+    def decode(self, buf: Any, out: np.ndarray | None = None) -> np.ndarray:
         """Decode the encoded input bytestream"""
         intstream = np.frombuffer(self.bloscer.decode(buf), dtype=np.int32)
         # Get chunk size
@@ -419,7 +431,7 @@ class LayerQuantizer(numcodecs.abc.Codec):
 
         return out
 
-    def get_config(self):
+    def get_config(self) -> dict[str, Any]:
         config = {
             "id": self.codec_id,
             "nbits": self.nbits,
@@ -432,7 +444,7 @@ class LayerQuantizer(numcodecs.abc.Codec):
         return config
 
     @classmethod
-    def from_config(cls, config):
+    def from_config(cls, config: dict[str, Any]) -> LayerQuantizer:
         return cls(**config)
 
 

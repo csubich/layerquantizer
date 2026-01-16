@@ -25,6 +25,8 @@ dev = [
     "pytest>=9.0.2",
     "ruff>=0.14.13",
     "types-setuptools>=80.9.0.20251223",
+    "xarray",
+    "zarr<3",
 ]
 
 [tool.mypy]

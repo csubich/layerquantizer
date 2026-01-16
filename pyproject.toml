@@ -1,0 +1,27 @@
+[project]
+name = "layerquantizer"
+version = "0.3b1"
+description = "LayerQuantizer, a numcodec-compatible quantizer/compressor for multi-layer data"
+authors = [{name = "Christopher Subich", email = "christopher.subich@ec.gc.ca"}]
+license = {file = "LICENSE"}
+readme = "README.md"
+dependencies = [
+    "numba",
+    "numpy",
+    "numcodecs",
+]
+requires-python = ">=3.10"
+
+[project.urls]
+Homepage = "https://github.com/csubich/layerquantizer"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "ruff>=0.14.13",
+]

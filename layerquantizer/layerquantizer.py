@@ -392,6 +392,14 @@ class LayerQuantizer(numcodecs.abc.Codec):
 
     def decode(self, buf: Any, out: np.ndarray | None = None) -> np.ndarray:
         """Decode the encoded input bytestream"""
+        if self.nbits > 24:
+            decoded_bytes = self.bloscer.decode(buf)
+            res = np.frombuffer(decoded_bytes, dtype=np.float32)
+            if out is not None:
+                out.ravel()[:] = res.ravel()
+                return out
+            return res
+
         intstream = np.frombuffer(self.bloscer.decode(buf), dtype=np.int32)
         # Get chunk size
         nplanes = intstream[0]

@@ -31,7 +31,11 @@ def test_xarray_zarr_integration():
     lq = LayerQuantizer(nbits=16, transform="Lorenzo")
     
     # 3. Use MemoryStore for zarr
-    store = zarr.MemoryStore()
+    try:
+        from zarr.storage import MemoryStore
+    except ImportError:
+        from zarr import MemoryStore
+    store = MemoryStore()
     
     # 4. Write to zarr with LayerQuantizer
     encoding = {"test_var": {"compressor": lq}}
@@ -53,7 +57,11 @@ def test_xarray_zarr_high_nbits_fallback():
     ds = xr.Dataset({"v": (("time", "lat", "lon"), data)})
     
     lq = LayerQuantizer(nbits=25)
-    store = zarr.MemoryStore()
+    try:
+        from zarr.storage import MemoryStore
+    except ImportError:
+        from zarr import MemoryStore
+    store = MemoryStore()
     ds.to_zarr(store, encoding={"v": {"compressor": lq}}, zarr_format=2)
     
     ds_read = xr.open_zarr(store, zarr_format=2)
@@ -67,7 +75,11 @@ def test_xarray_zarr_nan_handling():
     
     ds = xr.Dataset({"v": (("time", "lat", "lon"), data)})
     lq = LayerQuantizer(nbits=16)
-    store = zarr.MemoryStore()
+    try:
+        from zarr.storage import MemoryStore
+    except ImportError:
+        from zarr import MemoryStore
+    store = MemoryStore()
     ds.to_zarr(store, encoding={"v": {"compressor": lq}}, zarr_format=2)
     
     ds_read = xr.open_zarr(store, zarr_format=2)
@@ -83,7 +95,11 @@ def test_xarray_zarr_pow2_range():
     
     ds = xr.Dataset({"v": (("time", "lat", "lon"), data)})
     lq = LayerQuantizer(nbits=16, pow2_range=True)
-    store = zarr.MemoryStore()
+    try:
+        from zarr.storage import MemoryStore
+    except ImportError:
+        from zarr import MemoryStore
+    store = MemoryStore()
     ds.to_zarr(store, encoding={"v": {"compressor": lq}}, zarr_format=2)
     
     ds_read = xr.open_zarr(store, zarr_format=2)

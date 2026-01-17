@@ -17,59 +17,137 @@ try:
     # care when quantizing actual nan values (missing/out-of-bounds data)
     @numba.jit(
         [
-            numba.int32[:, :, :](
-                numba.types.Array(
-                    numba.types.float32, 3, "C", readonly=True
-                ),  # numba.float32[:,:,:],
+            numba.void(
+                numba.types.Array(numba.types.float32, 3, "C", readonly=True),
+                numba.float32[:],
+                numba.float32[:],
+            )
+        ],
+        nopython=True,
+        nogil=True,
+    )
+    def get_plane_extrema(
+        buf: np.ndarray, plane_min: np.ndarray, plane_max: np.ndarray
+    ) -> None:
+        """Calculate per-plane minima and maxima in a single pass."""
+        Nplanes, Ni, Nj = buf.shape
+        for kk in numba.prange(Nplanes):
+            p_min = np.float32(np.inf)
+            p_max = np.float32(-np.inf)
+            any_valid = False
+            for jj in range(Ni):
+                for ii in range(Nj):
+                    v = buf[kk, jj, ii]
+                    # Check for NaN.  np.isnan is safe here since we don't use fastmath
+                    if not np.isnan(v):
+                        if v < p_min:
+                            p_min = v
+                        if v > p_max:
+                            p_max = v
+                        any_valid = True
+            if not any_valid:
+                plane_min[kk] = 0
+                plane_max[kk] = 0
+            else:
+                plane_min[kk] = p_min
+                plane_max[kk] = p_max
+
+    @numba.jit(
+        [
+            numba.void(
+                numba.types.Array(numba.types.float32, 3, "C", readonly=True),
                 numba.int64,
                 numba.float32[:],
                 numba.float32[:],
-            ),
-            # Disable float64 compatibility for now because of fixed-type nan check
-            # numba.int32[:,:,:](numba.float64[:,:,:],
-            #                   numba.int64,numba.float64[:],
-            #                   numba.float64[:])
+                numba.bool_,
+                numba.int32[:, :, :],
+            )
         ],
         nopython=True,
         fastmath=True,
-    )  # ,parallel=True)
-    def quantizer(buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray) -> np.ndarray:
-        """Encode buffer through linear quantization, using per-layer minima
-        and maxima; each 2D plane of the buffer is an independent stream.  Internal processing
-        happens at float32 precision, so this encoder is only meaningful for nbits <= 23"""
+        nogil=True,
+    )
+    def quantize_kernel(
+        buf: np.ndarray,
+        nbits: int,
+        plane_min: np.ndarray,
+        plane_max: np.ndarray,
+        do_lorenzo: bool,
+        out: np.ndarray,
+    ) -> None:
+        """Encode buffer through linear quantization and optionally Lorenzo prediction,
+        returning the base-negative-two encoded results in a single pass."""
 
         Nplanes = buf.shape[0]
         Ni = buf.shape[1]
         Nj = buf.shape[2]
 
-        buftype = type(buf[0, 0, 0])
-
         # Maximum quantized level (0 -- MAX_LEVEL-1 inclusive, giving 2**nbits values)
         MAX_LEVEL = numba.int32(2**nbits - 1)
         # Sigil value for NaNs
         NAN_SIGIL = numba.int32(MAX_LEVEL + 1)
-        MAX_LEVELf = buftype(MAX_LEVEL)
+        MAX_LEVELf = np.float32(MAX_LEVEL)
 
-        quantized_int = np.empty((Nplanes, Ni, Nj), dtype=np.int32)
-        for ii in numba.prange(Nplanes):
-            plane_delta = plane_max[ii] - plane_min[ii]
+        Schroeppel2 = np.uint32(0xAAAAAAAA)
+
+        for kk in numba.prange(Nplanes):
+            plane_delta = plane_max[kk] - plane_min[kk]
             if plane_delta <= 0:
                 plane_delta = 1
             plane_scale = MAX_LEVELf / plane_delta
-            for jj in numba.prange(Ni):
-                for kk in range(Nj):
-                    # with fastmath=True, np.isnan is assumed to always be false.  However, we really really do
-                    # want to check for nans, so we go via the int32 representation of a float:
-                    # if (np.isnan(buf[ii,jj,kk])):
-                    if (buf.view(np.int32)[ii, jj, kk] & 0x7F80_0000) == 0x7F80_0000:
-                        # Catches ±inf and nans
-                        quantized_int[ii, jj, kk] = NAN_SIGIL
-                    else:
-                        quantized_int[ii, jj, kk] = np.rint(
-                            plane_scale * (buf[ii, jj, kk] - plane_min[ii])
-                        )
 
-        return quantized_int
+            if do_lorenzo:
+                # Buffer for the previous row of raw quantized values
+                prev_q_row = np.empty(Nj, dtype=np.int32)
+
+                for jj in range(Ni):
+                    q_left = np.int32(0)
+                    q_upleft = np.int32(0)
+                    for ii in range(Nj):
+                        # 1. Quantize
+                        if (buf.view(np.int32)[kk, jj, ii] & 0x7F80_0000) == 0x7F80_0000:
+                            q_curr = NAN_SIGIL
+                        else:
+                            q_curr = np.int32(
+                                np.rint(plane_scale * (buf[kk, jj, ii] - plane_min[kk]))
+                            )
+
+                        # 2. Lorenzo
+                        if jj == 0:
+                            if ii == 0:
+                                l_curr = q_curr
+                            else:
+                                l_curr = q_curr - q_left
+                        else:
+                            if ii == 0:
+                                l_curr = q_curr - prev_q_row[ii]
+                            else:
+                                l_curr = q_curr - prev_q_row[ii] - q_left + q_upleft
+
+                        # Update buffers for next iteration
+                        q_upleft = prev_q_row[ii]
+                        prev_q_row[ii] = q_curr
+                        q_left = q_curr
+
+                        # 3. Negabinary
+                        bu32 = np.uint32(l_curr)
+                        out[kk, jj, ii] = np.int32((bu32 + Schroeppel2) ^ Schroeppel2)
+            else:
+                for jj in range(Ni):
+                    for ii in range(Nj):
+                        if (buf.view(np.int32)[kk, jj, ii] & 0x7F80_0000) == 0x7F80_0000:
+                            out[kk, jj, ii] = NAN_SIGIL
+                        else:
+                            out[kk, jj, ii] = np.int32(
+                                np.rint(plane_scale * (buf[kk, jj, ii] - plane_min[kk]))
+                            )
+
+    def quantizer(
+        buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray
+    ) -> np.ndarray:
+        out = np.empty(buf.shape, dtype=np.int32)
+        quantize_kernel(buf, nbits, plane_min, plane_max, False, out)
+        return out
 
     @numba.jit(
         [
@@ -151,10 +229,28 @@ try:
         return out
 except ImportError:
     # numba isn't available, so define vector functions as a fallback
-    def quantizer(buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray) -> np.ndarray:
-        """Encode buffer through quantization and linear prediction, using per-layer minima
-        and maxima; each 2D plane of the buffer is an independent stream.  Internal processing
-        happens at float32 precision, so this encoder is only meaningful for nbits <= 23"""
+    def get_plane_extrema(
+        buf: np.ndarray, plane_min: np.ndarray, plane_max: np.ndarray
+    ) -> None:
+        """Calculate per-plane minima and maxima using numpy."""
+        with warnings.catch_warnings():
+            # Suppress a warning message if an entire plane is nans
+            warnings.filterwarnings("ignore", r"All-NaN (slice|axis) encountered")
+            plane_min[:] = np.nanmin(buf, axis=(1, 2))
+            plane_max[:] = np.nanmax(buf, axis=(1, 2))
+        # If an entire plane is nan (can happen with chunking), set the min and max to both be 0
+        np.nan_to_num(plane_min, copy=False, nan=0)
+        np.nan_to_num(plane_max, copy=False, nan=0)
+
+    def quantize_kernel(
+        buf: np.ndarray,
+        nbits: int,
+        plane_min: np.ndarray,
+        plane_max: np.ndarray,
+        do_lorenzo: bool,
+        out: np.ndarray,
+    ) -> None:
+        """Encode buffer through quantization and linear prediction using numpy."""
 
         # Maximum quantized level (0 -- MAX_LEVEL-1 inclusive, giving 2**nbits values)
         MAX_LEVEL = np.int32(2**nbits - 1)
@@ -162,20 +258,23 @@ except ImportError:
         NAN_SIGIL = np.int32(MAX_LEVEL + 1)
         MAX_LEVELf = float(MAX_LEVEL)
 
-        # quantized_int = jnp.empty((Nplanes,Ni,Nj),dtype=np.int32)
         plane_delta = np.where((plane_max - plane_min) > 0, plane_max - plane_min, 1)
 
-        # # Quantize the array per-plane
+        # Quantize the array per-plane
         plane_scale = MAX_LEVELf / plane_delta
-        # quantized_f = np.round(MAX_LEVEL * ((buf - plane_min[:,np.newaxis,np.newaxis])/(plane_delta[:,np.newaxis,np.newaxis])))
         quantized_f = np.rint(
             plane_scale[:, None, None] * (buf - plane_min[:, None, None])
         )
-        # # Mark any NANs by the sigil value
+        # Mark any NANs by the sigil value
         np.nan_to_num(quantized_f, copy=False, nan=float(NAN_SIGIL))
         quantized_int = quantized_f.astype(np.int32)
 
-        return quantized_int
+        if do_lorenzo:
+            quantized_int = negabinary(lorenzo2d(quantized_int))
+
+        out[:] = quantized_int
+
+    quantizer = None
 
     def dequantize_kernel(
         buf: np.ndarray,
@@ -361,14 +460,9 @@ class LayerQuantizer(numcodecs.abc.Codec):
         nplanes = buf.shape[0]
 
         # Look for the array minimum and maximum by plane
-        with warnings.catch_warnings():
-            # Suppress a warning message if an entire plane is nans
-            warnings.filterwarnings("ignore", r"All-NaN (slice|axis) encountered")
-            plane_min = np.nanmin(buf, axis=(1, 2))
-            plane_max = np.nanmax(buf, axis=(1, 2))
-        # If an entire plane is nan (can happen with chunking), set the min and max to both be 0
-        np.nan_to_num(plane_min, copy=False, nan=0)
-        np.nan_to_num(plane_max, copy=False, nan=0)
+        plane_min = np.empty(nplanes, dtype=np.float32)
+        plane_max = np.empty(nplanes, dtype=np.float32)
+        get_plane_extrema(buf, plane_min, plane_max)
 
         # Get the per-plane dynamic range
         plane_delta = plane_max - plane_min
@@ -423,11 +517,6 @@ class LayerQuantizer(numcodecs.abc.Codec):
                 plane_min + (plane_delta) * (2**self.nbits - 1) / (2**self.nbits)
             ).astype(np.float32)
 
-        quantized_int = quantizer(buf, self.nbits, plane_min, plane_max)
-
-        if self.transform == "Lorenzo":
-            quantized_int = negabinary(lorenzo2d(quantized_int))
-
         # Create the output buffer
         outbuf = np.empty((3 + 2 * nplanes + buf.size), dtype=np.int32)
 
@@ -440,7 +529,16 @@ class LayerQuantizer(numcodecs.abc.Codec):
         outbuf[(3 + nplanes) : (3 + 2 * nplanes)] = plane_max.view(np.int32)
 
         # Encode the quantized buffer values
-        outbuf[(3 + 2 * nplanes) :] = quantized_int.ravel()
+        data_view = outbuf[(3 + 2 * nplanes) :].view()
+        data_view.shape = buf.shape
+        quantize_kernel(
+            buf,
+            self.nbits,
+            plane_min,
+            plane_max,
+            self.transform == "Lorenzo",
+            data_view,
+        )
 
         # Output stream format:
         # [nplanes, nx, ny, mins[nplanes], max[nplanes], bitstream

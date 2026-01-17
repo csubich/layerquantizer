@@ -72,34 +72,83 @@ try:
         return quantized_int
 
     @numba.jit(
-        numba.float32[:, :, :](
-            numba.int32[:, :, :], numba.int64, numba.float32[:], numba.float32[:]
-        ),
+        [
+            numba.void(
+                numba.types.Array(numba.types.int32, 3, "C", readonly=True),
+                numba.float32[:, :, :],
+                numba.types.Array(numba.types.float32, 1, "C", readonly=True),
+                numba.float32[:],
+                numba.int64,
+                numba.bool_,
+            )
+        ],
         nopython=True,
         fastmath=True,
-    )  # ,parallel=True)
-    def dequantizer(
-        buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray
-    ) -> np.ndarray:
-        """Takes quantized integer values and re-scale them to their float32 equivalents"""
-        Nplanes = buf.shape[0]
-        Ni = buf.shape[1]
-        Nj = buf.shape[2]
+        nogil=True,
+    )
+    def dequantize_kernel(
+        int_field: np.ndarray,
+        out: np.ndarray,
+        plane_min: np.ndarray,
+        plane_delta: np.ndarray,
+        nbits: int,
+        do_lorenzo: bool,
+    ) -> None:
+        """Decode buffer through base-negative-two decoding, inverse Lorenzo,
+        and dequantization in a single pass."""
+        Nplanes = int_field.shape[0]
+        Ni = int_field.shape[1]
+        Nj = int_field.shape[2]
 
         MAX_LEVEL = numba.int32(2**nbits - 1)
         NAN_SIGIL = numba.int32(MAX_LEVEL + 1)
+        inv_max = np.float32(1.0 / MAX_LEVEL)
 
-        buf_out = np.empty((Nplanes, Ni, Nj), dtype=np.float32)
-        for ii in numba.prange(Nplanes):
-            delta = np.float32((plane_max[ii] - plane_min[ii]) / MAX_LEVEL)
-            for jj in numba.prange(Ni):
-                for kk in range(Nj):
-                    if buf[ii, jj, kk] == NAN_SIGIL:
-                        buf_out[ii, jj, kk] = np.nan
-                    else:
-                        buf_out[ii, jj, kk] = buf[ii, jj, kk] * delta + plane_min[ii]
+        Schroeppel2 = np.uint32(0xAAAAAAAA)
 
-        return buf_out
+        for kk in numba.prange(Nplanes):
+            delta = inv_max * plane_delta[kk]
+            p_min = plane_min[kk]
+
+            if do_lorenzo:
+                prev_q_row = np.empty(Nj, dtype=np.int32)
+
+                for jj in range(Ni):
+                    csum = np.int32(0)
+                    for ii in range(Nj):
+                        # 1. Binanegary
+                        bu32 = np.uint32(int_field[kk, jj, ii])
+                        l_val = np.int32((bu32 ^ Schroeppel2) - Schroeppel2)
+
+                        # 2. Unlorenzo
+                        csum += l_val
+                        if jj == 0:
+                            q = csum
+                        else:
+                            q = prev_q_row[ii] + csum
+
+                        prev_q_row[ii] = q
+
+                        # 3. Rescale
+                        if q == NAN_SIGIL:
+                            out[kk, jj, ii] = np.nan
+                        else:
+                            out[kk, jj, ii] = p_min + delta * q
+            else:
+                for jj in range(Ni):
+                    for ii in range(Nj):
+                        q = int_field[kk, jj, ii]
+                        if q == NAN_SIGIL:
+                            out[kk, jj, ii] = np.nan
+                        else:
+                            out[kk, jj, ii] = p_min + delta * q
+
+    def dequantizer(
+        buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray
+    ) -> np.ndarray:
+        out = np.empty(buf.shape, dtype=np.float32)
+        dequantize_kernel(buf, out, plane_min, plane_max - plane_min, nbits, False)
+        return out
 except ImportError:
     # numba isn't available, so define vector functions as a fallback
     def quantizer(buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray) -> np.ndarray:
@@ -128,18 +177,27 @@ except ImportError:
 
         return quantized_int
 
-    def dequantizer(
-        buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray
-    ) -> np.ndarray:
+    def dequantize_kernel(
+        buf: np.ndarray,
+        out: np.ndarray,
+        plane_min: np.ndarray,
+        plane_delta: np.ndarray,
+        nbits: int,
+        do_lorenzo: bool,
+    ) -> None:
         """Takes quantized integer values and re-scale them to their float32 equivalents"""
+        if do_lorenzo:
+            buf = unlorenzo2d(binanegary(buf.view(np.uint32)))
+
         MAX_LEVEL = np.int32(2**nbits - 1)
         NAN_SIGIL = np.int32(MAX_LEVEL + 1)
 
-        delta = ((plane_max - plane_min) / MAX_LEVEL).astype(np.float32)
-        buf_out = buf * delta[:, None, None] + plane_min[:, None, None]
-        buf_out[buf == NAN_SIGIL] = np.nan
+        delta = (plane_delta / MAX_LEVEL).astype(np.float32)
+        out_val = buf * delta[:, None, None] + plane_min[:, None, None]
+        out_val[buf == NAN_SIGIL] = np.nan
+        out[:] = out_val
 
-        return buf_out
+    dequantizer = None
 
 
 @numba.vectorize([numba.uint32(numba.int32)], nopython=True)
@@ -421,21 +479,14 @@ class LayerQuantizer(numcodecs.abc.Codec):
         int_field = intstream[(3 + 2 * nplanes) :].view()
         int_field.shape = (nplanes, nx, ny)
 
-        if self.transform == "Lorenzo":
-            int_field = unlorenzo2d(binanegary(int_field.view(np.uint32)))
-
-        rescale_output(out, int_field, plane_delta, plane_min, self.nbits)
-
-        # # Maximum quantized level (0 -- MAX_LEVEL inclusive)
-        # MAX_LEVEL = 2**self.nbits - 1
-        # # Sigil value for NaNs
-        # NAN_SIGIL = MAX_LEVEL+1
-
-        # out[:] = plane_min[:,np.newaxis,np.newaxis] + np.float32(((1/MAX_LEVEL)*(plane_delta[:,np.newaxis,np.newaxis])*int_field))
-        # # Re-assign any NANs
-
-        # NAN_SIGIL = 2**self.nbits + 1
-        # out[int_field == NAN_SIGIL] = np.nan
+        dequantize_kernel(
+            int_field,
+            out,
+            plane_min,
+            plane_delta,
+            self.nbits,
+            self.transform == "Lorenzo",
+        )
 
         return out
 

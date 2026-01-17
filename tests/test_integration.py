@@ -1,7 +1,5 @@
 import numpy as np
 import xarray as xr
-import zarr
-import pytest
 from layerquantizer.layerquantizer import LayerQuantizer
 
 def test_xarray_zarr_integration():
@@ -89,7 +87,7 @@ def test_xarray_zarr_nan_handling():
     np.testing.assert_allclose(data[0, 0, 1:], data_read[0, 0, 1:], atol=1e-4)
 
 def test_xarray_zarr_pow2_range():
-    ntime, nlat, nlon = 1, 4, 4
+    _ntime, _nlat, _nlon = 1, 4, 4
     # Range [0, 3] -> expanded to 4
     data = np.array([[[0.0, 1.0, 2.0, 3.0]] * 4], dtype=np.float32)
     

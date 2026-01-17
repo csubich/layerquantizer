@@ -6,7 +6,7 @@ from layerquantizer.layerquantizer import (
 
 def test_quantizer_basic():
     nbits = 8
-    n_planes, height, width = 1, 2, 2
+    _n_planes, _height, _width = 1, 2, 2
     buf = np.array([[[0.0, 10.0], [5.0, 7.5]]], dtype=np.float32)
     plane_min = np.array([0.0], dtype=np.float32)
     plane_max = np.array([10.0], dtype=np.float32)
@@ -26,7 +26,7 @@ def test_quantizer_basic():
 
 def test_dequantizer_basic():
     nbits = 8
-    n_planes, height, width = 1, 2, 2
+    _n_planes, _height, _width = 1, 2, 2
     quantized = np.array([[[0, 255], [128, 191]]], dtype=np.int32)
     plane_min = np.array([0.0], dtype=np.float32)
     plane_max = np.array([10.0], dtype=np.float32)

@@ -2,7 +2,7 @@ from __future__ import annotations
 import numcodecs
 import warnings
 import numpy as np
-from typing import Any
+from typing import Any, Callable, Optional
 
 # Define helper functions for quantization and dequantization
 try:
@@ -13,8 +13,10 @@ try:
 
     numba.config.THREADING_LAYER = "threadsafe"
 
-    # Numba note: fastmath=True causes LLVM to assume that nans don't exist, so this will require some
-    # care when quantizing actual nan values (missing/out-of-bounds data)
+    # Define placeholders so they can be reassigned in the try block
+    quantizer: Optional[Callable[[np.ndarray, int, np.ndarray, np.ndarray], np.ndarray]]
+    dequantizer: Optional[Callable[[np.ndarray, int, np.ndarray, np.ndarray], np.ndarray]]
+
     @numba.jit(
         [
             numba.void(
@@ -78,9 +80,7 @@ try:
         """Encode buffer through linear quantization and optionally Lorenzo prediction,
         returning the base-negative-two encoded results in a single pass."""
 
-        Nplanes = buf.shape[0]
-        Ni = buf.shape[1]
-        Nj = buf.shape[2]
+        Nplanes, Ni, Nj = buf.shape
 
         # Maximum quantized level (0 -- MAX_LEVEL-1 inclusive, giving 2**nbits values)
         MAX_LEVEL = numba.int32(2**nbits - 1)
@@ -89,58 +89,49 @@ try:
         MAX_LEVELf = np.float32(MAX_LEVEL)
 
         Schroeppel2 = np.uint32(0xAAAAAAAA)
+        buf_i32 = buf.view(np.int32)
 
         for kk in numba.prange(Nplanes):
-            plane_delta = plane_max[kk] - plane_min[kk]
+            p_min = plane_min[kk]
+            plane_delta = plane_max[kk] - p_min
             if plane_delta <= 0:
                 plane_delta = 1
             plane_scale = MAX_LEVELf / plane_delta
 
             if do_lorenzo:
                 # Buffer for the previous row of raw quantized values
-                prev_q_row = np.empty(Nj, dtype=np.int32)
+                prev_q_row = np.zeros(Nj, dtype=np.int32)
 
                 for jj in range(Ni):
-                    q_left = np.int32(0)
-                    q_upleft = np.int32(0)
+                    diff_left = np.int32(0)
                     for ii in range(Nj):
                         # 1. Quantize
-                        if (buf.view(np.int32)[kk, jj, ii] & 0x7F80_0000) == 0x7F80_0000:
+                        if (buf_i32[kk, jj, ii] & 0x7F80_0000) == 0x7F80_0000:
                             q_curr = NAN_SIGIL
                         else:
-                            q_curr = np.int32(
-                                np.rint(plane_scale * (buf[kk, jj, ii] - plane_min[kk]))
-                            )
+                            # Faster rounding for non-negative values
+                            q_curr = np.int32(plane_scale * (buf[kk, jj, ii] - p_min) + 0.5)
 
-                        # 2. Lorenzo
-                        if jj == 0:
-                            if ii == 0:
-                                l_curr = q_curr
-                            else:
-                                l_curr = q_curr - q_left
-                        else:
-                            if ii == 0:
-                                l_curr = q_curr - prev_q_row[ii]
-                            else:
-                                l_curr = q_curr - prev_q_row[ii] - q_left + q_upleft
-
-                        # Update buffers for next iteration
-                        q_upleft = prev_q_row[ii]
+                        # 2. Lorenzo (Difference of differences)
+                        # diff_curr is the vertical difference; l_curr is the horizontal difference of that.
+                        q_above = prev_q_row[ii]
+                        diff_curr = q_curr - q_above
+                        l_curr = diff_curr - diff_left
+                        
+                        # Update state for next pixel/row
                         prev_q_row[ii] = q_curr
-                        q_left = q_curr
+                        diff_left = diff_curr
 
-                        # 3. Negabinary
+                        # 3. Negabinary (inlined)
                         bu32 = np.uint32(l_curr)
                         out[kk, jj, ii] = np.int32((bu32 + Schroeppel2) ^ Schroeppel2)
             else:
                 for jj in range(Ni):
                     for ii in range(Nj):
-                        if (buf.view(np.int32)[kk, jj, ii] & 0x7F80_0000) == 0x7F80_0000:
+                        if (buf_i32[kk, jj, ii] & 0x7F80_0000) == 0x7F80_0000:
                             out[kk, jj, ii] = NAN_SIGIL
                         else:
-                            out[kk, jj, ii] = np.int32(
-                                np.rint(plane_scale * (buf[kk, jj, ii] - plane_min[kk]))
-                            )
+                            out[kk, jj, ii] = np.int32(plane_scale * (buf[kk, jj, ii] - p_min) + 0.5)
 
     def quantizer(
         buf: np.ndarray, nbits: int, plane_min: np.ndarray, plane_max: np.ndarray
@@ -174,9 +165,7 @@ try:
     ) -> None:
         """Decode buffer through base-negative-two decoding, inverse Lorenzo,
         and dequantization in a single pass."""
-        Nplanes = int_field.shape[0]
-        Ni = int_field.shape[1]
-        Nj = int_field.shape[2]
+        Nplanes, Ni, Nj = int_field.shape
 
         MAX_LEVEL = numba.int32(2**nbits - 1)
         NAN_SIGIL = numba.int32(MAX_LEVEL + 1)
@@ -189,22 +178,18 @@ try:
             p_min = plane_min[kk]
 
             if do_lorenzo:
-                prev_q_row = np.empty(Nj, dtype=np.int32)
+                prev_q_row = np.zeros(Nj, dtype=np.int32)
 
                 for jj in range(Ni):
                     csum = np.int32(0)
                     for ii in range(Nj):
-                        # 1. Binanegary
+                        # 1. Binanegary (inlined)
                         bu32 = np.uint32(int_field[kk, jj, ii])
                         l_val = np.int32((bu32 ^ Schroeppel2) - Schroeppel2)
 
                         # 2. Unlorenzo
                         csum += l_val
-                        if jj == 0:
-                            q = csum
-                        else:
-                            q = prev_q_row[ii] + csum
-
+                        q = prev_q_row[ii] + csum
                         prev_q_row[ii] = q
 
                         # 3. Rescale

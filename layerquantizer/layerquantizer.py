@@ -427,18 +427,12 @@ class LayerQuantizer(numcodecs.abc.Codec):
         self.pow2_range = pow2_range
         self.transform = transform
 
-    def encode(self, ibuf: np.ndarray) -> bytes | Any:
-        """Encode buffer through layer quantization; each 2D plane of the buffer is quantized
-        independently.  This encoder is only valid for float32, so nbits is only meaningful
-        for nbits <= 24; any larger value will result in no quantization"""
+    def _encode_to_int32(self, ibuf: np.ndarray) -> np.ndarray:
+        """Core quantization logic, returning an int32 array including header."""
         assert ibuf.dtype == np.float32
         # Create a view of the input buffer so that shape modifications are non-destructive to the
         # input array
         buf = ibuf.view()
-
-        if self.nbits > 24:
-            # Trivial encoding, just apply blosc to the field
-            return self.bloscer.encode(buf)
 
         # Reshape the buffer to (nplanes, ni, nj) format, since the quantization is effectively 3D
         buf.shape = (-1,) + tuple(buf.shape[-2:])
@@ -524,24 +518,26 @@ class LayerQuantizer(numcodecs.abc.Codec):
             self.transform == "Lorenzo",
             data_view,
         )
+        return outbuf
+
+    def encode(self, ibuf: np.ndarray) -> bytes | Any:
+        """Encode buffer through layer quantization; each 2D plane of the buffer is quantized
+        independently.  This encoder is only valid for float32, so nbits is only meaningful
+        for nbits <= 24; any larger value will result in no quantization"""
+        assert ibuf.dtype == np.float32
+
+        if self.nbits > 24:
+            # Trivial encoding, just apply blosc to the field
+            return self.bloscer.encode(ibuf)
+
+        outbuf = self._encode_to_int32(ibuf)
 
         # Output stream format:
         # [nplanes, nx, ny, mins[nplanes], max[nplanes], bitstream
         return self.bloscer.encode(outbuf)
 
-        # return outbuf
-
-    def decode(self, buf: Any, out: np.ndarray | None = None) -> np.ndarray:
-        """Decode the encoded input bytestream"""
-        if self.nbits > 24:
-            decoded_bytes = self.bloscer.decode(buf)
-            res = np.frombuffer(decoded_bytes, dtype=np.float32)
-            if out is not None:
-                out.ravel()[:] = res.ravel()
-                return out
-            return res
-
-        intstream = np.frombuffer(self.bloscer.decode(buf), dtype=np.int32)
+    def _decode_from_int32(self, intstream: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
+        """Core dequantization logic from an int32 array."""
         # Get chunk size
         nplanes = intstream[0]
         nx = intstream[1]
@@ -572,6 +568,19 @@ class LayerQuantizer(numcodecs.abc.Codec):
         )
 
         return out
+
+    def decode(self, buf: Any, out: np.ndarray | None = None) -> np.ndarray:
+        """Decode the encoded input bytestream"""
+        if self.nbits > 24:
+            decoded_bytes = self.bloscer.decode(buf)
+            res = np.frombuffer(decoded_bytes, dtype=np.float32)
+            if out is not None:
+                out.ravel()[:] = res.ravel()
+                return out
+            return res
+
+        intstream = np.frombuffer(self.bloscer.decode(buf), dtype=np.int32)
+        return self._decode_from_int32(intstream, out)
 
     def get_config(self) -> dict[str, Any]:
         config = {

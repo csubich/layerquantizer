@@ -1,6 +1,6 @@
 [project]
 name = "layerquantizer"
-version = "0.3b1"
+version = "0.3.2"
 description = "LayerQuantizer, a numcodec-compatible quantizer/compressor for multi-layer data"
 authors = [{name = "Christopher Subich", email = "christopher.subich@ec.gc.ca"}]
 license = {file = "LICENSE"}
@@ -28,6 +28,12 @@ dev = [
     "xarray",
     "zarr",
 ]
+
+[project.entry-points."zarr.codecs"]
+"layerquantizer0.3" = "layerquantizer.zarr3_codec:LayerQuantizerCodec"
+
+[project.entry-points."numcodecs.codecs"]
+"layerquantizer0.3b" = "layerquantizer.layerquantizer:LayerQuantizer"
 
 [tool.mypy]
 ignore_missing_imports = true

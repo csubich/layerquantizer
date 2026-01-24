@@ -110,6 +110,8 @@ class LayerQuantizerCodec(ArrayBytesCodec):
             else:
                 intstream = np.frombuffer(b, dtype='<i4')
                 decoded_arr = lq._decode_from_int32(intstream)
+                # Reshape back to original chunk shape
+                decoded_arr = decoded_arr.reshape(spec.shape)
             
             out.append(prototype.nd_buffer.from_numpy_array(decoded_arr.astype(np.float32)))
         return out

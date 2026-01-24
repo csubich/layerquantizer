@@ -22,10 +22,14 @@ build-backend = "setuptools.build_meta"
 [dependency-groups]
 dev = [
     "gcsfs>=2026.1.0",
+    "ipykernel>=7.1.0",
+    "jupyter>=1.1.1",
     "mypy>=1.19.1",
+    "nbconvert>=7.16.6",
     "pytest>=9.0.2",
     "ruff>=0.14.13",
     "tabulate>=0.9.0",
+    "tqdm>=4.67.1",
     "types-setuptools>=80.9.0.20251223",
     "types-tabulate>=0.9.0.20241207",
     "xarray",

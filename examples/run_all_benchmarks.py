@@ -5,7 +5,7 @@ import os
 
 # Add parent directory to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from utils import print_benchmark_table, clear_cache
+from utils import print_benchmark_table, print_summary_tables, clear_cache
 from benchmark_zarr2 import run_benchmark as run_zarr2
 from benchmark_zarr3 import run_benchmark as run_zarr3
 
@@ -52,7 +52,11 @@ async def main():
         }
         final_results.append(ordered_r)
         
+    print("\nDetailed Results:")
     print_benchmark_table(final_results)
+    
+    print("\nSummary Tables:")
+    print_summary_tables(final_results)
 
 if __name__ == "__main__":
     asyncio.run(main())

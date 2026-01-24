@@ -98,7 +98,8 @@ def print_benchmark_table(results: List[dict]):
     Print results in a Markdown table using tabulate.
     
     results is a list of dicts with keys:
-    'Variable', 'Decompressed', 'Compressed', 'Ratio', 'FS Error', 'Write Speed', 'Read Speed'
+    'Variable', 'Decompressed (MiB)', 'Compressed (MiB)', 'Ratio', 'FS Error', 'Write (MiB/s)', 'Read (MiB/s)'
+    Values can be strings or numbers.
     """
     try:
         from tabulate import tabulate
@@ -108,6 +109,108 @@ def print_benchmark_table(results: List[dict]):
             print(res)
         return
 
-    headers = list(results[0].keys())
-    rows = [list(res.values()) for res in results]
+    if not results:
+        return
+
+    # Create a copy for formatting
+    formatted_results = []
+    for r in results:
+        fr = {}
+        for k, v in r.items():
+            if isinstance(v, float):
+                if "Ratio" in k:
+                    fr[k] = f"{v:.2f}x"
+                elif "Error" in k:
+                    fr[k] = f"{v:.2e}"
+                elif "MiB" in k or "MiB/s" in k:
+                    fr[k] = f"{v:.1f}"
+                else:
+                    fr[k] = f"{v:.2f}"
+            else:
+                fr[k] = v
+        formatted_results.append(fr)
+
+    headers = list(formatted_results[0].keys())
+    rows = [list(res.values()) for res in formatted_results]
     print(tabulate(rows, headers=headers, tablefmt="github"))
+
+def print_summary_tables(results: List[dict]):
+    """
+    Print pivoted summary tables as requested in Task 12.
+    """
+    try:
+        from tabulate import tabulate
+    except ImportError:
+        return
+
+    if not results:
+        return
+
+    # Ensure all results have a 'FullConfig'
+    for r in results:
+        if "FullConfig" not in r:
+            z = f"Z{r['Zarr']} " if "Zarr" in r else ""
+            r["FullConfig"] = f"{z}{r['Config']}".strip()
+
+    variables = []
+    for r in results:
+        if r["Variable"] not in variables:
+            variables.append(r["Variable"])
+    
+    configs = []
+    for r in results:
+        if r["FullConfig"] not in configs:
+            configs.append(r["FullConfig"])
+
+    # 1. Compression Ratio Table
+    ratio_headers = ["Variable"] + configs
+    ratio_rows = []
+    for var in variables:
+        row = [var]
+        for cfg in configs:
+            match = next((r for r in results if r["Variable"] == var and r["FullConfig"] == cfg), None)
+            if match:
+                val = match["Ratio"]
+                row.append(f"{val:.2f}x" if isinstance(val, (int, float)) else val)
+            else:
+                row.append("N/A")
+        ratio_rows.append(row)
+    
+    print("\n### Compression Ratio (Higher is Better)")
+    print(tabulate(ratio_rows, headers=ratio_headers, tablefmt="github"))
+
+    # 2. Performance Table (Speed)
+    speed_headers = ["Metric"] + configs
+    write_row = ["Write (MiB/s)"]
+    read_row = ["Read (MiB/s)"]
+    
+    for cfg in configs:
+        cfg_results = [r for r in results if r["FullConfig"] == cfg]
+        if cfg_results:
+            write_speeds = [r["Write (MiB/s)"] for r in cfg_results if isinstance(r["Write (MiB/s)"], (int, float))]
+            read_speeds = [r["Read (MiB/s)"] for r in cfg_results if isinstance(r["Read (MiB/s)"], (int, float))]
+            write_row.append(f"{np.mean(write_speeds):.1f}" if write_speeds else "N/A")
+            read_row.append(f"{np.mean(read_speeds):.1f}" if read_speeds else "N/A")
+        else:
+            write_row.append("N/A")
+            read_row.append("N/A")
+
+    print("\n### Performance (Average MiB/s)")
+    print(tabulate([write_row, read_row], headers=speed_headers, tablefmt="github"))
+
+    # 3. Full-Scale Error Table
+    error_headers = ["Variable"] + configs
+    error_rows = []
+    for var in variables:
+        row = [var]
+        for cfg in configs:
+            match = next((r for r in results if r["Variable"] == var and r["FullConfig"] == cfg), None)
+            if match:
+                val = match["FS Error"]
+                row.append(f"{val:.2e}" if isinstance(val, (int, float)) else val)
+            else:
+                row.append("N/A")
+        error_rows.append(row)
+    
+    print("\n### Full-Scale Error (Lower is Better)")
+    print(tabulate(error_rows, headers=error_headers, tablefmt="github"))

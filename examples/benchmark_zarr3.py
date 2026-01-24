@@ -9,7 +9,7 @@ import os
 
 # Add parent directory to sys.path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from utils import get_wb_era5, sample_times, get_store_size, VARIABLES_3D, print_benchmark_table, clear_cache
+from utils import get_wb_era5, sample_times, get_store_size, VARIABLES_3D, print_benchmark_table, print_summary_tables, clear_cache
 
 from layerquantizer import LayerQuantizerCodec
 from zarr.codecs import BloscCodec
@@ -102,16 +102,17 @@ async def run_benchmark(args):
             results.append({
                 "Variable": var_name,
                 "Config": label,
-                "Decompressed (MiB)": f"{raw_bytes / (1024*1024):.1f}",
-                "Compressed (MiB)": f"{comp_bytes / (1024*1024):.1f}",
-                "Ratio": f"{ratio:.2f}x",
-                "FS Error": f"{fs_err:.2e}",
-                "Write (MiB/s)": f"{write_speed:.1f}",
-                "Read (MiB/s)": f"{read_speed:.1f}"
+                "Decompressed (MiB)": raw_bytes / (1024*1024),
+                "Compressed (MiB)": comp_bytes / (1024*1024),
+                "Ratio": ratio,
+                "FS Error": fs_err,
+                "Write (MiB/s)": write_speed,
+                "Read (MiB/s)": read_speed
             })
 
     print("\nBenchmark Results (Zarr 3):")
     print_benchmark_table(results)
+    print_summary_tables(results)
     return results
 
 if __name__ == "__main__":
